@@ -1,0 +1,138 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
+  "version": 1,
+  "name": "billing-platform-cdx-demo",
+  "metadata": {
+    "timestamp": "2026-09-24T10:00:00Z",
+    "component": {
+      "bom-ref": "pkg:pypi/web-app@2.1.0",
+      "type": "application",
+      "name": "web-app",
+      "version": "2.1.0",
+      "licenses": [{ "license": { "id": "AGPL-3.0" } }]
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:pypi/billing-core@1.2.0",
+      "type": "library",
+      "name": "billing-core",
+      "version": "1.2.0",
+      "licenses": [{ "license": { "id": "GPL-2.0" } }]
+    },
+    {
+      "bom-ref": "pkg:pypi/pdf-export@4.0.0",
+      "type": "library",
+      "name": "pdf-export",
+      "version": "4.0.0",
+      "licenses": [{ "license": { "id": "Apache-2.0" } }]
+    },
+    {
+      "bom-ref": "pkg:pypi/font-pack@2.0.0",
+      "type": "library",
+      "name": "font-pack",
+      "version": "2.0.0",
+      "licenses": [{ "license": { "name": "SIL Open Font License 1.1" } }]
+    },
+    {
+      "bom-ref": "pkg:pypi/crypto-lib@1.1.0",
+      "type": "library",
+      "name": "crypto-lib",
+      "version": "1.1.0",
+      "licenses": [{ "expression": "Apache-2.0" }]
+    },
+    {
+      "bom-ref": "pkg:pypi/legacy-math@0.3.0",
+      "type": "library",
+      "name": "legacy-math",
+      "version": "0.3.0",
+      "licenses": [{ "license": { "id": "GPL-3.0" } }]
+    },
+    {
+      "bom-ref": "pkg:npm/ui-kit@0.9.0",
+      "type": "library",
+      "name": "ui-kit",
+      "version": "0.9.0",
+      "licenses": [{ "license": { "id": "MIT" } }]
+    },
+    {
+      "bom-ref": "pkg:npm/icon-set@1.0.0",
+      "type": "library",
+      "name": "icon-set",
+      "version": "1.0.0",
+      "licenses": [{ "license": { "id": "CC0-1.0" } }]
+    },
+    {
+      "bom-ref": "pkg:npm/vendor-widget@5.0.0",
+      "type": "library",
+      "name": "vendor-widget",
+      "version": "5.0.0",
+      "licenses": [{ "license": { "name": "Proprietary" } }]
+    },
+    {
+      "bom-ref": "pkg:npm/%40org/logger@3.0.0",
+      "type": "library",
+      "name": "@org/logger",
+      "version": "3.0.0",
+      "licenses": [{ "license": { "id": "LGPL-2.1" } }]
+    },
+    {
+      "bom-ref": "pkg:npm/string-utils@2.2.0",
+      "type": "library",
+      "name": "string-utils",
+      "version": "2.2.0",
+      "licenses": [{ "license": { "id": "ISC" } }]
+    },
+    {
+      "bom-ref": "pkg:pypi/reports@0.5.0",
+      "type": "library",
+      "name": "reports",
+      "version": "0.5.0",
+      "licenses": [{ "license": { "id": "MPL-2.0" } }]
+    },
+    {
+      "bom-ref": "pkg:pypi/mpl-helper@1.0.0",
+      "type": "library",
+      "name": "mpl-helper",
+      "version": "1.0.0",
+      "licenses": [{ "license": { "id": "GPL-2.0" } }]
+    },
+    {
+      "bom-ref": "pkg:pypi/internal-tool@0.1.0",
+      "type": "library",
+      "name": "internal-tool",
+      "version": "0.1.0"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:pypi/web-app@2.1.0",
+      "dependsOn": [
+        "pkg:pypi/billing-core@1.2.0",
+        "pkg:npm/ui-kit@0.9.0",
+        "pkg:npm/%40org/logger@3.0.0",
+        "pkg:pypi/reports@0.5.0",
+        "pkg:pypi/internal-tool@0.1.0",
+        "pkg:pypi/cache-redis@0.4.0"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/billing-core@1.2.0",
+      "dependsOn": [
+        "pkg:pypi/pdf-export@4.0.0",
+        "pkg:pypi/crypto-lib@1.1.0",
+        "pkg:pypi/legacy-math@0.3.0",
+        "pkg:npm/%40org/logger@3.0.0"
+      ]
+    },
+    {"ref": "pkg:pypi/pdf-export@4.0.0", "dependsOn": ["pkg:pypi/font-pack@2.0.0"]},
+    {
+      "ref": "pkg:npm/ui-kit@0.9.0",
+      "dependsOn": ["pkg:npm/icon-set@1.0.0", "pkg:npm/vendor-widget@5.0.0"]
+    },
+    {"ref": "pkg:npm/%40org/logger@3.0.0", "dependsOn": ["pkg:npm/string-utils@2.2.0"]},
+    {"ref": "pkg:pypi/reports@0.5.0", "dependsOn": ["pkg:pypi/mpl-helper@1.0.0"]}
+  ]
+}

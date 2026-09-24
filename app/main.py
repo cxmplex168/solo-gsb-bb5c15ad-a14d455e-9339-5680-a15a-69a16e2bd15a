@@ -12,10 +12,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import analyzer, compare as compare_mod, database, licenses, reviews as reviews_mod
+from . import analyzer, compare as compare_mod, cyclonedx, database, licenses, reviews as reviews_mod
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 SAMPLE_PATH = STATIC_DIR / "examples" / "sample-manifest.json"
+SAMPLE_CYCLONEDX_PATH = STATIC_DIR / "examples" / "sample-cyclonedx.json"
 
 
 @asynccontextmanager
@@ -28,11 +29,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="许可证依赖冲突审计台",
     description=(
-        "上传包含包名、版本、许可证与依赖边的 manifest，"
+        "上传包含包名、版本、许可证与依赖边的 manifest（或 CycloneDX JSON BOM），"
         "系统规范化节点后按许可证兼容矩阵计算传递约束，"
         "标出每个冲突的最短依赖路径，支持按包筛选与 JSON 导出。"
+        "CycloneDX 输入按 bomFormat / components / dependencies 自动识别。"
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -54,7 +56,10 @@ class ReviewCreateRequest(BaseModel):
 def _audit_payload(manifest: Any, name: Optional[str]) -> Dict[str, Any]:
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=422, detail="manifest 必须是 JSON 对象。")
-    result = analyzer.analyze_manifest(manifest, name or "uploaded-manifest")
+    try:
+        result = analyzer.analyze_manifest(manifest, name or "uploaded-manifest")
+    except cyclonedx.CycloneDXImportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     if result.get("status") == "error":
         raise HTTPException(status_code=422, detail=result.get("error", "manifest 无法解析。"))
     audit_id = database.save_audit(result, manifest)
@@ -66,7 +71,7 @@ def _audit_payload(manifest: Any, name: Optional[str]) -> Dict[str, Any]:
 # --- JSON API ---------------------------------------------------------------
 
 
-@app.post("/api/audit", tags=["audit"], summary="审计 manifest（JSON 请求体）")
+@app.post("/api/audit", tags=["audit"], summary="审计 manifest 或 CycloneDX BOM（JSON 请求体，按 bomFormat 自动识别）")
 def audit_manifest(payload: AuditRequest) -> Dict[str, Any]:
     manifest = dict(payload.manifest)
     if payload.name:
@@ -74,7 +79,7 @@ def audit_manifest(payload: AuditRequest) -> Dict[str, Any]:
     return _audit_payload(manifest, payload.name)
 
 
-@app.post("/api/audit/upload", tags=["audit"], summary="上传 manifest 文件审计")
+@app.post("/api/audit/upload", tags=["audit"], summary="上传 manifest / CycloneDX BOM 文件审计（按 bomFormat 自动识别）")
 async def upload_manifest(
     file: UploadFile = File(..., description="manifest JSON 文件"),
     name: Optional[str] = None,
@@ -241,6 +246,11 @@ def license_matrix() -> Dict[str, Any]:
 @app.get("/api/sample", tags=["meta"], summary="获取内置示例 manifest")
 def sample_manifest() -> Dict[str, Any]:
     return json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
+
+
+@app.get("/api/sample/cyclonedx", tags=["meta"], summary="获取内置 CycloneDX BOM 示例")
+def sample_cyclonedx() -> Dict[str, Any]:
+    return json.loads(SAMPLE_CYCLONEDX_PATH.read_text(encoding="utf-8"))
 
 
 @app.get("/healthz", tags=["meta"], summary="健康检查")

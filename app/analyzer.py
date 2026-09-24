@@ -1,6 +1,8 @@
-"""manifest 解析、节点规范化与传递许可证约束分析。
+"""manifest / CycloneDX BOM 解析、节点规范化与传递许可证约束分析。
 
-支持的 manifest 结构（均为可选字段，可混用）::
+支持两种输入格式（由 ``analyze_manifest`` 按内容自动识别）：
+
+1. 内置 manifest 结构（字段均可选，可混用）::
 
     {
       "name": "my-app",
@@ -18,8 +20,13 @@
       "edges": [ {"source": "lib-a@1.4.0", "target": "utils@1.2.0"} ]
     }
 
-顶层 ``packages`` 声明节点；``dependencies``（包内或顶层）与 ``edges``
-声明依赖边。依赖边方向为 *使用方 -> 被依赖方*，传递约束沿边传播。
+2. CycloneDX JSON BOM（含 ``"bomFormat": "CycloneDX"``）：``components`` 声明
+   节点（``bom-ref`` 作为引用键），``dependencies`` 的 ``ref`` / ``dependsOn``
+   声明依赖边；解析、严格校验（重复 bom-ref、同名同版本不同许可证 -> 422）与
+   未解析引用告警见 :mod:`app.cyclonedx`，节点/边最终汇入同一套图分析。
+
+顶层 ``packages``/``components`` 声明节点；``dependencies``（包内或顶层）与
+``edges`` 声明依赖边。依赖边方向为 *使用方 -> 被依赖方*，传递约束沿边传播。
 """
 
 from __future__ import annotations
@@ -27,9 +34,12 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from . import licenses as lic
+from . import cyclonedx, licenses as lic
 
 UNVERSIONED = "*"  # 未声明版本时的占位版本
+
+MANIFEST_FORMAT = "manifest-json"
+CYCLONEDX_FORMAT = "cyclonedx-json"
 
 
 # --- 基础规范化 -------------------------------------------------------------
@@ -84,58 +94,59 @@ def _add_warning(warnings: List[str], seen: Set[str], message: str) -> None:
         warnings.append(message)
 
 
-# --- 解析 manifest ----------------------------------------------------------
+# --- 依赖图构建（manifest 与 CycloneDX 归一后共用） ---------------------------
 
 
-def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") -> Dict[str, Any]:
-    """解析并审计 manifest，返回完整审计结果字典。"""
-    warnings: List[str] = []
-    warning_seen: Set[str] = set()
-    warn = lambda msg: _add_warning(warnings, warning_seen, msg)
+class _GraphBuilder:
+    """收集规范化节点、依赖边与未解析引用，最后交给 _build_result 分析。"""
 
-    if not isinstance(manifest, dict):
-        return _empty_result(manifest_name) | {
-            "status": "error",
-            "error": "manifest 必须是 JSON 对象，包含 packages / dependencies / edges 等字段。",
-            "warnings": warnings,
-        }
+    def __init__(self, display_name: str) -> None:
+        self.display_name = display_name
+        self.nodes: Dict[str, Dict[str, Any]] = {}
+        self.order: List[str] = []
+        self.edges: List[Dict[str, Any]] = []
+        self.unresolved: List[Dict[str, str]] = []
+        self.unresolved_seen: Set[Tuple[str, str]] = set()
+        self.warnings: List[str] = []
+        self.warning_seen: Set[str] = set()
 
-    display_name = str(manifest.get("name") or manifest_name).strip() or manifest_name
+    def warn(self, message: str) -> None:
+        _add_warning(self.warnings, self.warning_seen, message)
 
-    nodes: Dict[str, Dict[str, Any]] = {}
-    order: List[str] = []
-    edges: List[Dict[str, Any]] = []
-    unresolved: List[Dict[str, str]] = []
-    unresolved_seen: Set[Tuple[str, str]] = set()
+    def mark_unresolved(self, source: str, ref: str, reason: str) -> None:
+        _mark_unresolved(self.unresolved, self.unresolved_seen, source, ref, reason)
 
-    def register_package(pkg: Any) -> Optional[str]:
+    def add_edge(self, source: str, target: str, origin: str) -> None:
+        self.edges.append({"source": source, "target": target, "from": origin})
+
+    def register_package(self, pkg: Any) -> Optional[str]:
         if not isinstance(pkg, dict):
-            warn("packages 中存在非对象条目，已跳过：%r" % (pkg,))
+            self.warn("packages 中存在非对象条目，已跳过：%r" % (pkg,))
             return None
         name = str(pkg.get("name") or "").strip()
         if not name:
             pkg_id = str(pkg.get("id") or "").strip()
             if not pkg_id:
-                warn("packages 中存在缺少 name 的条目，已跳过：%r" % (pkg,))
+                self.warn("packages 中存在缺少 name 的条目，已跳过：%r" % (pkg,))
                 return None
             parsed = split_ref(pkg_id)
             if not parsed:
-                warn("packages 中存在无法解析的 id：%r" % (pkg_id,))
+                self.warn("packages 中存在无法解析的 id：%r" % (pkg_id,))
                 return None
             name, version = parsed
         else:
             version, _ = clean_version(pkg.get("version"))
         nid = node_id(name, version)
         info = lic.license_info(pkg.get("license"))
-        if nid in nodes:
-            existing = nodes[nid]
+        if nid in self.nodes:
+            existing = self.nodes[nid]
             if existing["license_display"] != info["display"]:
-                warn(
+                self.warn(
                     "包 %s 被重复声明且许可证不一致（%s vs %s），保留首次声明的 %s。"
                     % (nid, existing["license_display"], info["display"], existing["license_display"])
                 )
             return nid
-        nodes[nid] = {
+        self.nodes[nid] = {
             "id": nid,
             "name": name,
             "version": version,
@@ -148,13 +159,13 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
             "constraints": [],
             "conflict_count": 0,
         }
-        order.append(nid)
+        self.order.append(nid)
         return nid
 
-    def resolve_ref(ref: object, source_nid: str) -> Optional[str]:
+    def resolve_ref(self, ref: object, source_nid: str) -> Optional[str]:
         parsed = split_ref(ref)
         if not parsed:
-            _mark_unresolved(unresolved, unresolved_seen, source_nid, str(ref), "引用无法解析")
+            self.mark_unresolved(source_nid, str(ref), "引用无法解析")
             return None
         ref_name, ref_version = parsed
         # 依赖项内联声明（带 license 等字段）时注册为节点
@@ -162,87 +173,130 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
             inline = dict(ref)
             inline.setdefault("name", parsed[0])
             inline.setdefault("version", "" if ref_version == UNVERSIONED else ref_version)
-            register_package(inline)
+            self.register_package(inline)
         if ref_version != UNVERSIONED:
             target = node_id(ref_name, ref_version)
-            if target in nodes:
+            if target in self.nodes:
                 return target
-            _mark_unresolved(
-                unresolved,
-                unresolved_seen,
+            self.mark_unresolved(
                 source_nid,
                 "%s@%s" % (ref_name, ref_version),
                 "依赖的精确版本未在 packages 中声明",
             )
             return None
         # 只给了名字：唯一匹配则解析，多个匹配则要求消歧
-        candidates = [n for n in order if nodes[n]["name"].lower() == ref_name]
+        candidates = [n for n in self.order if self.nodes[n]["name"].lower() == ref_name]
         if len(candidates) == 1:
             return candidates[0]
         if len(candidates) == 0:
-            _mark_unresolved(
-                unresolved, unresolved_seen, source_nid, ref_name, "依赖包未在 packages 中声明"
-            )
+            self.mark_unresolved(source_nid, ref_name, "依赖包未在 packages 中声明")
         else:
-            _mark_unresolved(
-                unresolved,
-                unresolved_seen,
+            self.mark_unresolved(
                 source_nid,
                 ref_name,
                 "存在多个版本：%s，请用 name@version 消歧" % ", ".join(sorted(candidates)),
             )
         return None
 
+    def deduped_edges(self) -> List[Dict[str, Any]]:
+        """去重边（保留首次出现的来源）。"""
+        deduped: List[Dict[str, Any]] = []
+        seen_edges: Set[Tuple[str, str]] = set()
+        for edge in self.edges:
+            key = (edge["source"], edge["target"])
+            if key not in seen_edges:
+                seen_edges.add(key)
+                deduped.append(edge)
+        return deduped
+
+    def build(self, raw_manifest: Any, input_format: str = MANIFEST_FORMAT) -> Dict[str, Any]:
+        return _build_result(
+            self.display_name,
+            raw_manifest,
+            self.nodes,
+            self.order,
+            self.deduped_edges(),
+            self.unresolved,
+            self.warnings,
+            input_format,
+        )
+
+
+# --- 解析 manifest ----------------------------------------------------------
+
+
+def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") -> Dict[str, Any]:
+    """解析并审计 manifest 或 CycloneDX BOM，返回完整审计结果字典。
+
+    含 ``bomFormat`` 字段时按 CycloneDX JSON 处理；CycloneDX 结构性错误
+    （bomFormat 不支持、bom-ref 重复、同名同版本许可证冲突）抛出
+    :class:`~app.cyclonedx.CycloneDXImportError`，由 API 层转为 422。
+    """
+    if not isinstance(manifest, dict):
+        return _empty_result(manifest_name) | {
+            "status": "error",
+            "error": "manifest 必须是 JSON 对象，包含 packages / dependencies / edges 等字段。",
+            "warnings": [],
+        }
+
+    if "bomFormat" in manifest:
+        builder = _GraphBuilder(manifest_name)
+        display_name = cyclonedx.populate(builder, manifest, manifest_name)
+        builder.display_name = display_name
+        return builder.build(manifest, input_format=CYCLONEDX_FORMAT)
+
+    display_name = str(manifest.get("name") or manifest_name).strip() or manifest_name
+    builder = _GraphBuilder(display_name)
+    _parse_manifest(manifest, builder)
+    return builder.build(manifest, input_format=MANIFEST_FORMAT)
+
+
+def _parse_manifest(manifest: Dict[str, Any], builder: _GraphBuilder) -> None:
+    """内置 manifest 结构 -> 节点/边（归一后的 CycloneDX BOM 同样走这里）。"""
     # 1) 注册所有显式包节点（两遍：先注册保证名字引用可解析）
     raw_packages = manifest.get("packages")
     if isinstance(raw_packages, list):
         for pkg in raw_packages:
-            register_package(pkg)
+            builder.register_package(pkg)
     elif raw_packages is not None:
-        warn("packages 字段不是数组，已忽略。")
+        builder.warn("packages 字段不是数组，已忽略。")
 
     # 2) 包内 dependencies
     if isinstance(raw_packages, list):
         for pkg in raw_packages:
             if not isinstance(pkg, dict):
                 continue
-            source = register_package(pkg)  # 已注册则返回既有 id
+            source = builder.register_package(pkg)  # 已注册则返回既有 id
             deps = pkg.get("dependencies")
             if deps is None:
                 continue
             for ref in _iter_refs(deps):
-                target = resolve_ref(ref, source or "?")
+                target = builder.resolve_ref(ref, source or "?")
                 if source and target and source != target:
-                    edges.append(
-                        {
-                            "source": source,
-                            "target": target,
-                            "from": "package-dependencies",
-                        }
-                    )
+                    builder.add_edge(source, target, "package-dependencies")
 
     # 3) 顶层 dependencies（映射或数组形式）
     top_deps = manifest.get("dependencies")
     if top_deps is not None:
         if isinstance(top_deps, dict):
             for src_ref, targets in top_deps.items():
-                source = resolve_ref(src_ref, "?")
+                source = builder.resolve_ref(src_ref, "?")
                 if not source:
                     continue
                 for ref in _iter_refs(targets):
-                    target = resolve_ref(ref, source)
+                    target = builder.resolve_ref(ref, source)
                     if target and source != target:
-                        edges.append({"source": source, "target": target, "from": "dependencies"})
+                        builder.add_edge(source, target, "dependencies")
         elif isinstance(top_deps, list):
             for entry in top_deps:
                 if not isinstance(entry, dict):
                     continue
-                source = resolve_ref(entry.get("source") or entry.get("from"), "?")
-                target = resolve_ref(entry.get("target") or entry.get("to"), source or "?")
+                source = builder.resolve_ref(entry.get("source") or entry.get("from"), "?")
+                target = builder.resolve_ref(entry.get("target") or entry.get("to"), source or "?")
                 if source and target and source != target:
-                    edges.append({"source": source, "target": target, "from": "dependencies"})
+                    builder.add_edge(source, target, "dependencies")
         else:
-            warn("顶层 dependencies 字段类型不支持，已忽略。")
+            builder.warn("顶层 dependencies 字段类型不支持，已忽略。")
 
     # 4) 显式 edges
     raw_edges = manifest.get("edges")
@@ -250,29 +304,12 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
         for entry in raw_edges:
             if not isinstance(entry, dict):
                 continue
-            source = resolve_ref(entry.get("source") or entry.get("from"), "?")
-            target = resolve_ref(entry.get("target") or entry.get("to"), source or "?")
+            source = builder.resolve_ref(entry.get("source") or entry.get("from"), "?")
+            target = builder.resolve_ref(entry.get("target") or entry.get("to"), source or "?")
             if source and target and source != target:
-                edges.append(
-                    {
-                        "source": source,
-                        "target": target,
-                        "from": str(entry.get("type") or "edges"),
-                    }
-                )
+                builder.add_edge(source, target, str(entry.get("type") or "edges"))
     elif raw_edges is not None:
-        warn("edges 字段不是数组，已忽略。")
-
-    # 去重边（保留首次出现的来源）
-    deduped_edges: List[Dict[str, Any]] = []
-    seen_edges: Set[Tuple[str, str]] = set()
-    for edge in edges:
-        key = (edge["source"], edge["target"])
-        if key not in seen_edges:
-            seen_edges.add(key)
-            deduped_edges.append(edge)
-
-    return _build_result(display_name, manifest, nodes, order, deduped_edges, unresolved, warnings)
+        builder.warn("edges 字段不是数组，已忽略。")
 
 
 def _iter_refs(value: Any):
@@ -315,6 +352,7 @@ def _build_result(
     edges: List[Dict[str, Any]],
     unresolved: List[Dict[str, str]],
     parse_warnings: List[str],
+    input_format: str = MANIFEST_FORMAT,
 ) -> Dict[str, Any]:
     adjacency: Dict[str, List[str]] = {nid: [] for nid in order}
     for edge in edges:
@@ -398,6 +436,7 @@ def _build_result(
 
     result = {
         "manifest_name": display_name,
+        "input_format": input_format,
         "status": status,
         "summary": {
             "packages": len(order),
@@ -435,6 +474,7 @@ def _distance_to(parents: Dict[str, Optional[str]], start: str, end: str) -> int
 def _empty_result(name: str) -> Dict[str, Any]:
     return {
         "manifest_name": name,
+        "input_format": MANIFEST_FORMAT,
         "status": "clean",
         "summary": {
             "packages": 0,

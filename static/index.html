@@ -131,17 +131,18 @@
 
 <main>
   <section class="card">
-    <h2>1. 上传或粘贴 manifest</h2>
+    <h2>1. 上传或粘贴 manifest / CycloneDX BOM</h2>
     <div id="alert" class="alert"></div>
-    <textarea id="input" spellcheck="false" placeholder='{"name":"my-app","packages":[{"name":"app","version":"1.0","license":"GPL-3.0","dependencies":["lib@1.0"]}],"edges":[...]}'></textarea>
+    <textarea id="input" spellcheck="false" placeholder='内置 manifest：{"name":"my-app","packages":[{"name":"app","version":"1.0","license":"GPL-3.0","dependencies":["lib@1.0"]}]}&#10;CycloneDX：{"bomFormat":"CycloneDX","components":[{"bom-ref":"app","name":"app","version":"1.0","licenses":[{"license":{"id":"GPL-3.0"}}]}],"dependencies":[{"ref":"app","dependsOn":["lib"]}]}'></textarea>
     <div class="row">
       <button id="btn-audit">开始审计</button>
       <label class="secondary" style="border:1px solid var(--line);border-radius:7px;padding:9px 16px;cursor:pointer;background:#eef2f8;color:var(--brand-dark);font-weight:600;font-size:13px;">
         选择 JSON 文件
         <input id="file" type="file" accept=".json,application/json" style="display:none">
       </label>
-      <button class="secondary" id="btn-sample">载入示例</button>
-      <span class="hint">依赖边方向：使用方 → 被依赖方；支持 packages / dependencies / edges 混合声明。</span>
+      <button class="secondary" id="btn-sample">载入 manifest 示例</button>
+      <button class="secondary" id="btn-sample-cdx">载入 CycloneDX 示例</button>
+      <span class="hint">自动识别：含 <span class="mono">bomFormat</span> 的 JSON 按 CycloneDX 处理（components + dependencies）；否则按内置 manifest 处理。依赖边方向：使用方 → 被依赖方。</span>
     </div>
   </section>
 
@@ -165,7 +166,7 @@
   <section id="result" class="hidden-block">
     <div class="card">
       <div class="row" style="justify-content:space-between;">
-        <h2 style="margin:0;">3. 审计结果 <span id="r-name" class="muted" style="font-weight:400;font-size:13px;"></span></h2>
+        <h2 style="margin:0;">3. 审计结果 <span id="r-name" class="muted" style="font-weight:400;font-size:13px;"></span><span id="r-format"></span></h2>
         <span id="r-status"></span>
       </div>
       <div class="stats" style="margin-top:14px;">
@@ -261,6 +262,10 @@ function render(result) {
   currentResult = result;
   $("result").className = "";
   $("r-name").textContent = "— " + result.manifest_name + "（#" + result.audit_id + "，" + (result.created_at || "") + "）";
+  const formatEl = $("r-format");
+  formatEl.innerHTML = result.input_format === "cyclonedx-json"
+    ? ' <span class="pill" title="CycloneDX JSON BOM（bomFormat 自动识别）">CycloneDX BOM</span>'
+    : "";
   const s = result.summary;
   $("s-pkgs").textContent = s.packages;
   $("s-edges").textContent = s.edges;
@@ -453,6 +458,12 @@ $("file").addEventListener("change", () => {
 
 $("btn-sample").addEventListener("click", async () => {
   const data = await (await fetch("/api/sample")).json();
+  $("input").value = JSON.stringify(data, null, 2);
+  clearAlert();
+});
+
+$("btn-sample-cdx").addEventListener("click", async () => {
+  const data = await (await fetch("/api/sample/cyclonedx")).json();
   $("input").value = JSON.stringify(data, null, 2);
   clearAlert();
 });
