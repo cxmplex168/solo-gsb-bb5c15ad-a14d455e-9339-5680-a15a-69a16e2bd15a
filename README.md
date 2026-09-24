@@ -1,7 +1,7 @@
 # 许可证依赖冲突审计台
 
 基于 **FastAPI + SQLite** 的依赖许可证合规审计工具。上传包含包名、版本、许可证及依赖边的
-manifest，系统会：
+manifest（或直接上传 **CycloneDX JSON** SBOM），系统会：
 
 1. **规范化节点** —— 统一包名/版本写法、把许可证别名（`Apache 2.0`、`GPLv3`、`MIT License`…）
    映射为规范 SPDX 标识，合并重复节点并归一依赖边；
@@ -19,7 +19,11 @@ manifest，系统会：
    生成指纹，在网页上填写复核备注与失效时间即可打标，也可随时撤销；标记持久化在 SQLite，
    对**所有历史审计**生效：读取任意审计时，指纹一致且未过期、未撤销的最新标记会自动
    附到对应条目上，并区分「待复核 / 已复核」。许可证变更（指纹改变）、标记过期或被撤销后，
-   条目自动回到待复核；原始冲突、严重程度与两次审计对比结果完全不受影响。
+   条目自动回到待复核；原始冲突、严重程度与两次审计对比结果完全不受影响；
+8. **CycloneDX SBOM 导入** —— 网页粘贴/上传与 `POST /api/audit`、`/api/audit/upload`
+   均自动识别 CycloneDX JSON（`bomFormat` + `components` + `dependencies`）：
+   组件的 `bom-ref` 映射为包节点，按 `ref` / `dependsOn` 还原依赖边后复用同一套
+   兼容矩阵与最短路径冲突分析；审计结果照常进入历史列表并可导出。
 
 ## 快速开始（Docker Compose，一键启动，推荐）
 
@@ -27,14 +31,16 @@ manifest，系统会：
 docker compose up --build          # 前台启动（加 -d 可后台运行）
 ```
 
-服务监听容器内 **8000** 端口，Compose 已映射到宿主机 **8000**：<http://localhost:8000/>。
+服务监听容器内 **8000** 端口，Compose 已映射到宿主机 **8000**：网页界面与 JSON API
+共用该端口——浏览器打开 <http://localhost:8000/> 即可使用网页，API 则通过
+`http://localhost:8000/api/...` 访问（交互式文档在 <http://localhost:8000/docs>）。
 容器启动时会自动初始化数据库（SQLite 文件位于卷 `audit-data`，容器内路径 `/data/audit.db`）。
 
-启动后访问：
+启动后访问（均为宿主机 8000 端口）：
 
 | 地址 | 说明 |
 | --- | --- |
-| <http://localhost:8000/> | 网页界面（已自动载入示例 manifest；第 2 节可选择两次历史审计进行对比） |
+| <http://localhost:8000/> | 网页界面（已自动载入示例 manifest，可一键切换 CycloneDX 示例；第 2 节可选择两次历史审计进行对比） |
 | <http://localhost:8000/docs> | Swagger 风格交互式 JSON API 文档 |
 | <http://localhost:8000/redoc> | ReDoc API 文档 |
 | <http://localhost:8000/api/matrix> | 许可证兼容矩阵（机器可读） |
@@ -95,12 +101,86 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
   相关边按“需人工确认”告警处理，而非误判为兼容；
 - 依赖环会被安全处理（BFS 节点只访问一次），不影响最短路径计算。
 
+## CycloneDX JSON（SBOM）导入
+
+除上述原生 manifest 外，网页粘贴/上传与 `POST /api/audit`、`/api/audit/upload`
+均可直接接受 **CycloneDX JSON**。识别规则（满足其一）：
+
+- 顶层存在 `bomFormat` 字段（取值必须为 `CycloneDX`，其他取值返回 422）；
+- 或顶层存在数组形式的 `components` 且未使用原生格式的 `packages`。
+
+```json
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "metadata": { "component": { "type": "application", "name": "shop-backend", "version": "3.2.0" } },
+  "components": [
+    {
+      "type": "application",
+      "bom-ref": "pkg:app/shop-backend@3.2.0",
+      "name": "shop-backend",
+      "version": "3.2.0",
+      "licenses": [ { "license": { "id": "GPL-2.0" } } ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/web-ui@1.4.2",
+      "name": "web-ui",
+      "version": "1.4.2",
+      "licenses": [ { "expression": "Apache-2.0" } ]
+    }
+  ],
+  "dependencies": [
+    { "ref": "pkg:app/shop-backend@3.2.0", "dependsOn": ["pkg:npm/web-ui@1.4.2"] }
+  ]
+}
+```
+
+导入约定：
+
+- **节点**：每个 `components[]` 组件按 `name` + `version` 规范化为包节点（与原生
+  manifest 同一套规则），组件的 `bom-ref` 记录在节点的 `bom_refs` 字段并建立
+  `bom-ref → 节点` 映射；审计名依次取顶层 `name`、`metadata.component.name`、
+  请求参数 `name`；
+- **依赖边**：`dependencies[]` 按 `ref` / `dependsOn` 还原为「使用方 → 被依赖方」
+  的依赖边，随后复用同一套兼容矩阵与最短路径冲突分析；
+- **许可证**：取组件 `licenses` 中的 SPDX `id` 或 `expression`（兜底取
+  `license.name`，同样走别名规范化）；多个并列 id/name 按 CycloneDX 的选择语义
+  以 ` OR ` 连接（通常会落入 unknown，交由人工确认）；**缺失许可证按未知处理**
+  （显示为 `UNLICENSED`，相关边按“需人工确认”告警）；
+- **422（不静默合并）**：同一 `bom-ref` 重复出现，或同名同版本组件对应不同许可证
+  （按规范化后的标识比较，`MIT` 与 `MIT License` 视为相同）时，返回明确的
+  `422` 错误并中止导入，需修正 BOM 后重新提交；
+- **未解析引用**：`dependencies` 中引用了不存在于 `components` 的 bom-ref 时，
+  对应条目进入 `unresolved` 列表并产生告警，不会凭空造节点；
+- 结果与原生 manifest 完全一致地进入历史列表、参与两次审计对比、按包筛选与导出，
+  导出 JSON 中带 `"source_format": "cyclonedx"` 标识。
+
+内置示例：`GET /api/sample/cyclonedx`（网页端「载入 CycloneDX 示例」按钮同源）。
+
+```bash
+# 直接提交 CycloneDX BOM 审计
+curl -X POST http://localhost:8000/api/audit \
+  -H "Content-Type: application/json" \
+  -d "{\"manifest\": $(cat static/examples/sample-cyclonedx.json)}"
+
+# 或上传 SBOM 文件
+curl -F "file=@static/examples/sample-cyclonedx.json" http://localhost:8000/api/audit/upload
+
+# 422 示例：重复 bom-ref
+$ curl -s -X POST http://localhost:8000/api/audit -H "Content-Type: application/json" \
+    -d '{"manifest": {"bomFormat": "CycloneDX", "components": [
+          {"bom-ref": "a", "name": "x", "version": "1"},
+          {"bom-ref": "a", "name": "y", "version": "2"}]}}'
+{"detail":"components 中 bom-ref 重复：'a'。为避免静默合并组件，已中止导入，请去重后重新提交。"}
+```
+
 ## JSON API 速览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/audit` | 提交 JSON：`{"manifest": {...}, "name": "可选名称"}` |
-| POST | `/api/audit/upload` | 上传 `.json` manifest 文件（multipart） |
+| POST | `/api/audit` | 提交 JSON：`{"manifest": {...}, "name": "可选名称"}`（自动识别 CycloneDX BOM） |
+| POST | `/api/audit/upload` | 上传 `.json` manifest / CycloneDX SBOM 文件（multipart） |
 | GET | `/api/audits?limit=20` | 历史审计列表 |
 | GET | `/api/audits/{id}` | 获取审计结果；`?package=xxx` 按包筛选 |
 | GET | `/api/audits/{id}?download=true&package=xxx` | 导出（筛选后的）JSON 文件 |
@@ -112,6 +192,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/api/reviews/{id}/revoke` | **撤销复核标记**（保留历史记录） |
 | GET | `/api/matrix` | 许可证兼容矩阵 |
 | GET | `/api/sample` | 内置示例 manifest |
+| GET | `/api/sample/cyclonedx` | 内置 CycloneDX 示例 BOM |
 
 示例：
 
@@ -247,6 +328,9 @@ curl -X POST http://localhost:8000/api/reviews/1/revoke           # 撤销（保
 }
 ```
 
+CycloneDX 导入的审计结果结构相同，另带 `"source_format": "cyclonedx"` 标识，
+且每个节点多一个 `bom_refs` 字段记录映射到该节点的组件 bom-ref。
+
 ## 兼容矩阵说明（方向：父作品许可证 → 依赖许可证）
 
 | 父 \ 依赖 | MIT / BSD / ISC / CC0 | Apache-2.0 | MPL-2.0 | LGPL-2.1 / 3.0 | GPL-2.0 | GPL-3.0 | AGPL-3.0 | Proprietary |
@@ -272,15 +356,16 @@ curl -X POST http://localhost:8000/api/reviews/1/revoke           # 撤销（保
 .
 ├── app/
 │   ├── main.py        # FastAPI 路由（JSON API + 网页，含两次审计对比与复核标记接口）
-│   ├── analyzer.py    # manifest 解析、节点规范化、传递约束、最短路径
+│   ├── analyzer.py    # manifest 解析、节点规范化、传递约束、最短路径（自动路由 CycloneDX）
+│   ├── cyclonedx.py   # CycloneDX JSON 导入：bom-ref 映射节点、ref/dependsOn 还原依赖边
 │   ├── compare.py     # 两次审计对比：节点/冲突配对与变化检测（纯只读）
 │   ├── reviews.py     # 复核标记：指纹计算、失效时间规范化、审计结果附着
 │   ├── licenses.py    # 许可证别名规范化与兼容矩阵
 │   └── database.py    # SQLite 初始化与审计记录/复核标记持久化
 ├── static/
 │   ├── index.html     # 单文件网页（无外部 CDN 依赖）
-│   └── examples/sample-manifest.json
-├── tests/             # 轻量自测：python -m tests.test_analyzer / test_compare / test_reviews
+│   └── examples/      # sample-manifest.json 与 sample-cyclonedx.json 两个内置示例
+├── tests/             # 轻量自测：python -m tests.test_analyzer / test_compare / test_reviews / test_cyclonedx
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

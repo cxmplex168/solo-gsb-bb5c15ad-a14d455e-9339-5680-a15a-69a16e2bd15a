@@ -20,6 +20,11 @@
 
 顶层 ``packages`` 声明节点；``dependencies``（包内或顶层）与 ``edges``
 声明依赖边。依赖边方向为 *使用方 -> 被依赖方*，传递约束沿边传播。
+
+除上述原生格式外，也支持直接提交 CycloneDX JSON（SBOM）：带 ``bomFormat``
+或 ``components`` 数组的输入会路由到 ``cyclonedx`` 模块解析（组件 bom-ref
+映射为包节点、按 ref/dependsOn 还原依赖边），随后复用本模块的传递约束与
+最短路径冲突分析。
 """
 
 from __future__ import annotations
@@ -99,6 +104,12 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
             "error": "manifest 必须是 JSON 对象，包含 packages / dependencies / edges 等字段。",
             "warnings": warnings,
         }
+
+    # CycloneDX BOM（bomFormat / components）走专门解析，复用本模块的分析与结果构建
+    from . import cyclonedx  # 延迟导入，避免与 cyclonedx 模块循环依赖
+
+    if cyclonedx.is_cyclonedx(manifest):
+        return cyclonedx.analyze_bom(manifest, manifest_name)
 
     display_name = str(manifest.get("name") or manifest_name).strip() or manifest_name
 

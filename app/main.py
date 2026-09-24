@@ -16,6 +16,7 @@ from . import analyzer, compare as compare_mod, database, licenses, reviews as r
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 SAMPLE_PATH = STATIC_DIR / "examples" / "sample-manifest.json"
+SAMPLE_CYCLONEDX_PATH = STATIC_DIR / "examples" / "sample-cyclonedx.json"
 
 
 @asynccontextmanager
@@ -28,8 +29,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="许可证依赖冲突审计台",
     description=(
-        "上传包含包名、版本、许可证与依赖边的 manifest，"
-        "系统规范化节点后按许可证兼容矩阵计算传递约束，"
+        "上传包含包名、版本、许可证与依赖边的 manifest，或直接提交 CycloneDX JSON"
+        "（自动识别 bomFormat / components / dependencies，按 bom-ref 映射节点、"
+        "按 ref/dependsOn 还原依赖边），系统规范化节点后按许可证兼容矩阵计算传递约束，"
         "标出每个冲突的最短依赖路径，支持按包筛选与 JSON 导出。"
     ),
     version="1.0.0",
@@ -38,7 +40,9 @@ app = FastAPI(
 
 
 class AuditRequest(BaseModel):
-    manifest: Dict[str, Any] = Field(..., description="待审计的 manifest 对象")
+    manifest: Dict[str, Any] = Field(
+        ..., description="待审计的 manifest 对象（也支持 CycloneDX BOM，自动识别）"
+    )
     name: Optional[str] = Field(None, description="本次审计的名称（可选）")
 
 
@@ -66,7 +70,11 @@ def _audit_payload(manifest: Any, name: Optional[str]) -> Dict[str, Any]:
 # --- JSON API ---------------------------------------------------------------
 
 
-@app.post("/api/audit", tags=["audit"], summary="审计 manifest（JSON 请求体）")
+@app.post(
+    "/api/audit",
+    tags=["audit"],
+    summary="审计 manifest（JSON 请求体，自动识别 CycloneDX BOM）",
+)
 def audit_manifest(payload: AuditRequest) -> Dict[str, Any]:
     manifest = dict(payload.manifest)
     if payload.name:
@@ -241,6 +249,11 @@ def license_matrix() -> Dict[str, Any]:
 @app.get("/api/sample", tags=["meta"], summary="获取内置示例 manifest")
 def sample_manifest() -> Dict[str, Any]:
     return json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
+
+
+@app.get("/api/sample/cyclonedx", tags=["meta"], summary="获取内置 CycloneDX 示例 BOM")
+def sample_cyclonedx() -> Dict[str, Any]:
+    return json.loads(SAMPLE_CYCLONEDX_PATH.read_text(encoding="utf-8"))
 
 
 @app.get("/healthz", tags=["meta"], summary="健康检查")

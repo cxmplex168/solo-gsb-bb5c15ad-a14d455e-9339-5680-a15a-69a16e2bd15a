@@ -124,16 +124,16 @@
 <body>
 <header class="top">
   <h1>🛡️ 许可证依赖冲突审计台</h1>
-  <p>规范化依赖节点 · 按许可证兼容矩阵计算传递约束 · 标出冲突的最短依赖路径 · 支持按包筛选与 JSON 导出
+  <p>规范化依赖节点 · 支持 CycloneDX SBOM 导入 · 按许可证兼容矩阵计算传递约束 · 标出冲突的最短依赖路径 · 支持按包筛选与 JSON 导出
     <a href="/docs" target="_blank">API 文档</a><a href="/api/matrix" target="_blank">兼容矩阵</a>
   </p>
 </header>
 
 <main>
   <section class="card">
-    <h2>1. 上传或粘贴 manifest</h2>
+    <h2>1. 上传或粘贴 manifest / CycloneDX BOM</h2>
     <div id="alert" class="alert"></div>
-    <textarea id="input" spellcheck="false" placeholder='{"name":"my-app","packages":[{"name":"app","version":"1.0","license":"GPL-3.0","dependencies":["lib@1.0"]}],"edges":[...]}'></textarea>
+    <textarea id="input" spellcheck="false" placeholder='{"name":"my-app","packages":[{"name":"app","version":"1.0","license":"GPL-3.0","dependencies":["lib@1.0"]}],"edges":[...]}  或直接粘贴 CycloneDX JSON（{"bomFormat":"CycloneDX","components":[...],"dependencies":[...]}）'></textarea>
     <div class="row">
       <button id="btn-audit">开始审计</button>
       <label class="secondary" style="border:1px solid var(--line);border-radius:7px;padding:9px 16px;cursor:pointer;background:#eef2f8;color:var(--brand-dark);font-weight:600;font-size:13px;">
@@ -141,7 +141,8 @@
         <input id="file" type="file" accept=".json,application/json" style="display:none">
       </label>
       <button class="secondary" id="btn-sample">载入示例</button>
-      <span class="hint">依赖边方向：使用方 → 被依赖方；支持 packages / dependencies / edges 混合声明。</span>
+      <button class="secondary" id="btn-sample-cdx">载入 CycloneDX 示例</button>
+      <span class="hint">依赖边方向：使用方 → 被依赖方；支持 packages / dependencies / edges 混合声明，也可直接粘贴或上传 CycloneDX JSON（自动识别 bomFormat / components / dependencies，按 bom-ref 还原依赖图）。</span>
     </div>
   </section>
 
@@ -453,6 +454,12 @@ $("file").addEventListener("change", () => {
 
 $("btn-sample").addEventListener("click", async () => {
   const data = await (await fetch("/api/sample")).json();
+  $("input").value = JSON.stringify(data, null, 2);
+  clearAlert();
+});
+
+$("btn-sample-cdx").addEventListener("click", async () => {
+  const data = await (await fetch("/api/sample/cyclonedx")).json();
   $("input").value = JSON.stringify(data, null, 2);
   clearAlert();
 });
